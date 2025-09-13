@@ -17,7 +17,7 @@ export default defineEventHandler(async (event) => {
     const body = await readBody(event);
 
     // 使用 Zod 验证数据
-    const parseResult = operatorInsertSchema.safeParse(JSON.parse(body));
+    const parseResult = operatorInsertSchema.safeParse(body);
 
     if (!parseResult.success) {
         throw createError({

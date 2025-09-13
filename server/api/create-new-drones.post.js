@@ -30,7 +30,7 @@ export default defineEventHandler(async (event) => {
     const client = await serverSupabaseClient(event);
     const body = await readBody(event);
 
-    const parseResult = droneInsertSchema.safeParse(JSON.parse(body));
+    const parseResult = droneInsertSchema.safeParse(body);
 
     if (!parseResult.success) {
         throw createError({

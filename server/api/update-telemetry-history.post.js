@@ -25,7 +25,7 @@ export default defineEventHandler(async (event) => {
     // 验证输入数据
     let parseResult = null;
     try{
-        parseResult = telemetryInsertSchema.safeParse(JSON.parse(body));
+        parseResult = telemetryInsertSchema.safeParse(body);
     }catch(e){
         throw createError({
             statusCode: 400,
