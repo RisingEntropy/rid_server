@@ -11,14 +11,31 @@ export default defineEventHandler(async (event) => {
         let rid_info = deserializeRIDInfo(Buffer.from(zhaoteng_payload.data, 'base64'));
         let rssi = zhaoteng_payload.rxInfo[0].rssi;
         rid_info.signal_quality = rssi;
-        rid_info.timestamp = new Date(Number(rid_info.timestamp)).toISOString();
+        rid_info.timestamp = new Date(Number(rid_info.timestamp) * 1000).toISOString();
         let response = await $fetch('/api/update-telemetry-history', {
             method: 'POST',
             headers:{
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify(rid_info)
+            body: JSON.stringify({
+                serial_number: rid_info.product_id,
+                timestamp: rid_info.timestamp,
+                location: [rid_info.longitude, rid_info.latitude],
+                altitude: rid_info.altitude,
+                speed: rid_info.speed,
+                report_id: rid_info.report_id,
+                signal_quality: rid_info.signal_quality,
+                satellites: rid_info.satellites,
+                source: 'LORA',
+                aaa:"BBB",
+                extra_info: {
+                    "SF": zhaoteng_payload.txInfo.modulation.lora.spreadingFactor,
+                    "BW": zhaoteng_payload.txInfo.modulation.lora.bandwidth,
+                    "CR": zhaoteng_payload.txInfo.modulation.lora.codingRate,
+                }
+            })
         });
+
         return response;
     }catch(err){
         throw createError({

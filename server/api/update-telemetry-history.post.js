@@ -42,7 +42,6 @@ export default defineEventHandler(async (event) => {
     }
 
     const validatedData = parseResult.data;
-
     // 1. 检查无人机是否存在
     const { data: existingDrone, error: checkError } = await client
         .from('drones')
@@ -110,7 +109,6 @@ export default defineEventHandler(async (event) => {
         updateData.last_wifi_extra_info = null;
         updateData.last_4G_extra_info = null;
     }else{// keep the same
-        console.log(drone)
         updateData.last_lora_quality = drone.last_lora_quality;
         updateData.last_wifi_quality = drone.last_wifi_quality;
         updateData.last_4G_quality = drone.last_4G_quality;
