@@ -17,7 +17,12 @@ const droneInsertSchema = z.object({
     last_altitude: z.number().optional().nullable(),
     last_report_id: z.number().int({ message: "last_report_id must be an integer." }).optional().nullable(),
     last_satellites: z.number().int({ message: "last_satellites must be an integer." }).optional().nullable(),
-    last_source: z.number().int({ message: "last_source must be an integer." }).optional().default(0),
+    last_wifi_quality: z.number().int({ message: "last_wifi_quality must be an integer." }).optional().default(999),
+    last_lora_quality: z.number().int({ message: "last_lora_quality must be an integer." }).optional().default(999),
+    last_4G_quality: z.number().int({ message: "last_4g_quality must be an integer." }).optional().default(999),
+    last_lora_extra_info: z.json().optional().nullable(),
+    last_wifi_extra_info: z.json().optional().nullable(),
+    last_4G_extra_info: z.json().optional().nullable(),
 });
 
 
@@ -25,13 +30,12 @@ export default defineEventHandler(async (event) => {
     const client = await serverSupabaseClient(event);
     const body = await readBody(event);
 
-    const parseResult = droneInsertSchema.safeParse(body);
+    const parseResult = droneInsertSchema.safeParse(JSON.parse(body));
 
     if (!parseResult.success) {
         throw createError({
             statusCode: 400,
             statusMessage: 'Invalid data provided.',
-            data: parseResult.error.flatten().fieldErrors,
         });
     }
 
@@ -57,7 +61,7 @@ export default defineEventHandler(async (event) => {
         // 抛出 409 Conflict 错误，这是表示资源冲突的最合适的 HTTP 状态码
         throw createError({
             statusCode: 409, // 409 Conflict
-            statusMessage: `序列号 '${validatedData.serial_number}' 已存在，请勿重复添加。`,
+            statusMessage: `Serial number '${validatedData.serial_number}' already exists`,
         });
     }
     // ------ 检查结束 ------
@@ -70,7 +74,7 @@ export default defineEventHandler(async (event) => {
     }
 
     // 执行插入操作
-    const { data: insertData, error: insertError } = await client
+    const {error: insertError } = await client
         .from('drones')
         .insert(dataToInsert)
         .select()
