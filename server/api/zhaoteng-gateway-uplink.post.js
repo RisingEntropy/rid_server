@@ -27,7 +27,6 @@ export default defineEventHandler(async (event) => {
                 signal_quality: rid_info.signal_quality,
                 satellites: rid_info.satellites,
                 source: 'LORA',
-                aaa:"BBB",
                 extra_info: {
                     "SF": zhaoteng_payload.txInfo.modulation.lora.spreadingFactor,
                     "BW": zhaoteng_payload.txInfo.modulation.lora.bandwidth,
