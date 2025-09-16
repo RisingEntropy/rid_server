@@ -85,7 +85,7 @@
               class="list-item"
               :class="{ 
                 'online': drone.status?.is_online,
-                'signal-warning': hasSignalWarning(drone.id)
+                'signal-warning': hasSignalWarning(drone.id) && drone.status?.is_online
               }"
               @click="centerOnDrone(drone)"
             >
@@ -93,7 +93,7 @@
                 <div class="drone-header">
                   <span class="drone-serial">{{ drone.serial_number }}</span>
                   <span 
-                    v-if="hasSignalWarning(drone.id)" 
+                    v-if="hasSignalWarning(drone.id) && drone.status?.is_online" 
                     class="warning-badge"
                     :title="getSignalWarningMessage(drone.id)"
                   >
@@ -107,7 +107,7 @@
                   </span>
                 </div>
                 <!-- 信号丢失计数显示 -->
-                <div v-if="getSignalLostInfo(drone.id)" class="signal-lost-info">
+                <div v-if="getSignalLostInfo(drone.id) && drone.status?.is_online" class="signal-lost-info">
                   <span v-if="getSignalLostInfo(drone.id).wifi >= 2" class="lost-badge wifi">
                     WiFi: {{ getSignalLostInfo(drone.id).wifi }}
                   </span>
