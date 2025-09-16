@@ -44,7 +44,6 @@ interface LostCounts {
 const props = defineProps<{
   signalInfo: SignalInfo
   lostCounts?: LostCounts
-  drone_is_online: boolean
 }>()
 
 // 获取丢失计数
@@ -110,7 +109,7 @@ const allSignalsLost = computed(() => {
   }
   
   // 如果有活跃信号源，检查是否都丢失
-  return activeSignals.length > 0 && activeSignals.every(lost => lost) &&
+  return activeSignals.length > 0 && activeSignals.every(lost => lost)
 })
 </script>
 

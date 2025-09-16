@@ -108,13 +108,13 @@
                 </div>
                 <!-- 信号丢失计数显示 -->
                 <div v-if="getSignalLostInfo(drone.id)" class="signal-lost-info">
-                  <span v-if="getSignalLostInfo(drone.id).wifi >= 2 || (!drone.is_online)" class="lost-badge wifi">
+                  <span v-if="getSignalLostInfo(drone.id).wifi >= 2" class="lost-badge wifi">
                     WiFi: {{ getSignalLostInfo(drone.id).wifi }}
                   </span>
-                  <span v-if="getSignalLostInfo(drone.id).lora >= 2 || (!drone.is_online)" class="lost-badge lora">
+                  <span v-if="getSignalLostInfo(drone.id).lora >= 2" class="lost-badge lora">
                     LoRa: {{ getSignalLostInfo(drone.id).lora }}
                   </span>
-                  <span v-if="getSignalLostInfo(drone.id).cellular >= 2 || (!drone.is_online)" class="lost-badge cellular">
+                  <span v-if="getSignalLostInfo(drone.id).cellular >= 2" class="lost-badge cellular">
                     4G: {{ getSignalLostInfo(drone.id).cellular }}
                   </span>
                 </div>
