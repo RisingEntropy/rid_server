@@ -1,7 +1,7 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
     modules: [
-        '@nuxtjs/supabase'
+        '@nuxtjs/supabase',
     ],
     supabase: {
         // Options
@@ -15,5 +15,11 @@ export default defineNuxtConfig({
         server: {
             allowedHosts: true
         }
-    }
+    },
+    runtimeConfig: {
+        public: {
+          amapKey: '', // 默认值
+          amapSecurityKey: '' // 默认值
+        }
+   }
 })

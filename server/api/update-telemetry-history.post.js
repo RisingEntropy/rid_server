@@ -12,11 +12,68 @@ const telemetryInsertSchema = z.object({
     altitude: z.number().default(0),
     speed: z.number().default(0),
     report_id: z.number().int({ message: "report_id must be an integer." }).default(-1),
-    signal_quality: z.number().int().default(0),
-    satellites: z.number().int({ message: "satellites must be an integer." }).optional().default(-1),
+    signal_quality: z.number().default(0),
+    satellites: z.number().int({ message: "satellites must be an integer." }).optional().default(0),
     source: z.string().min(1, { message: "source is required and cannot be empty." }),
-    extra_info: z.json().optional().nullable(),
+    extra_info: z.any().optional().nullable(),
 });
+
+// 辅助函数：生成表名
+function generateTableName(droneId) {
+    // 将ID中的-替换为下划线
+    return `T${droneId.replace(/-/g, '_')}`;
+}
+
+// 辅助函数：使用RPC函数插入遥测数据
+async function insertTelemetryViaRPC(client, tableName, telemetryData) {
+    const { data, error } = await client.rpc('insert_telemetry_data', {
+        p_table_name: tableName,
+        p_telemetry_data: telemetryData
+    });
+    
+    return { data, error };
+}
+
+// 辅助函数：创建无人机历史记录表
+async function createDroneTelemetryTable(client, tableName, droneId) {
+    try {
+        // 调用存储过程创建表
+        const { error } = await client.rpc('create_telemetry_table', { 
+            p_table_name: tableName,
+            p_drone_id: droneId 
+        });
+        
+        if (error) {
+            console.error(`Error creating table ${tableName}:`, error);
+            return false;
+        }
+        
+        console.log(`Successfully created table ${tableName}`);
+        return true;
+    } catch (error) {
+        console.error(`Failed to create table ${tableName}:`, error);
+        return false;
+    }
+}
+
+// 辅助函数：检查表是否存在（通过RPC）
+async function checkTableExistsViaRPC(client, tableName) {
+    try {
+        const { data, error } = await client.rpc('check_table_exists', {
+            p_table_name: tableName
+        });
+        
+        if (error) {
+            console.error(`Error checking table existence:`, error);
+            return false;
+        }
+        
+        return data === true;
+    } catch (error) {
+        console.error(`Failed to check table existence:`, error);
+        return false;
+    }
+}
 
 export default defineEventHandler(async (event) => {
     const client = await serverSupabaseClient(event);
@@ -42,6 +99,7 @@ export default defineEventHandler(async (event) => {
     }
 
     const validatedData = parseResult.data;
+
     // 1. 检查无人机是否存在
     const { data: existingDrone, error: checkError } = await client
         .from('drones')
@@ -58,6 +116,8 @@ export default defineEventHandler(async (event) => {
     }
 
     let droneId, drone;
+    let tableName;
+    let isNewDrone = false;
 
     // 2. 如果无人机不存在，创建新的无人机
     if (!existingDrone) {
@@ -67,6 +127,7 @@ export default defineEventHandler(async (event) => {
             model: validatedData.model || null,
             operator_id: await getOperatorIdBySerialNumber(client, validatedData.serial_number),
         };
+
         // 插入新无人机
         const { data: newDrone, error: insertDroneError } = await client
             .from('drones')
@@ -83,13 +144,48 @@ export default defineEventHandler(async (event) => {
         }
 
         drone = newDrone;
+        droneId = drone.id;
+        isNewDrone = true;
+        console.log(`Created new drone with ID: ${droneId} for serial number: ${validatedData.serial_number}`);
 
-        console.log(`Created new drone with ID: ${drone.id} for serial number: ${validatedData.serial_number}`);
-    }else{
+        // 为新无人机创建专属的历史记录表
+        tableName = generateTableName(droneId);
+        
+        // 创建表
+        const tableCreated = await createDroneTelemetryTable(client, tableName, droneId);
+        
+        if (!tableCreated) {
+            console.error(`Failed to create table ${tableName} for new drone ${droneId}`);
+            // 可以选择删除刚创建的无人机记录
+            await client.from('drones').delete().eq('id', droneId);
+            throw createError({
+                statusCode: 500,
+                statusMessage: 'Failed to create telemetry table for new drone.',
+            });
+        }
+        
+        console.log(`Created telemetry table ${tableName} for drone ${droneId}`);
+    } else {
         drone = existingDrone;
+        droneId = drone.id;
+        tableName = generateTableName(droneId);
+        
+        // 检查表是否存在，如果不存在则创建
+        const tableExists = await checkTableExistsViaRPC(client, tableName);
+        if (!tableExists) {
+            console.log(`Table ${tableName} does not exist for existing drone ${droneId}, creating...`);
+            const tableCreated = await createDroneTelemetryTable(client, tableName, droneId);
+            
+            if (!tableCreated) {
+                throw createError({
+                    statusCode: 500,
+                    statusMessage: `Failed to create telemetry table ${tableName} for existing drone.`,
+                });
+            }
+        }
     }
 
-    droneId = drone.id;
+    // 3. 更新无人机的last_xxx参数
     const updateData = {
         last_location: validatedData.location,
         last_seen_at: validatedData.timestamp,
@@ -98,17 +194,15 @@ export default defineEventHandler(async (event) => {
         last_report_id: validatedData.report_id,
         last_satellites: validatedData.satellites,
     };
-
-    //如果drone.last_report和当前数据一致，说明是通过不同手段报上来的数据，跟新即可，否则，清空last_wifi/lora/4g 字段
-    if(drone.last_report_id === undefined || drone.last_report_id === null || drone.last_report_id !== validatedData.report_id) {
-
+    // 如果drone.last_report和当前数据不一致，说明是通过不同手段报上来的数据，更新即可，否则，清空last_wifi/lora/4g 字段
+    if(drone.last_report_id === undefined || drone.last_report_id === null || drone.last_report_id !== validatedData.report_id){
         updateData.last_lora_quality = null;
         updateData.last_wifi_quality = null;
         updateData.last_4G_quality = null;
         updateData.last_lora_extra_info = null;
         updateData.last_wifi_extra_info = null;
         updateData.last_4G_extra_info = null;
-    }else{// keep the same
+    }else{
         updateData.last_lora_quality = drone.last_lora_quality;
         updateData.last_wifi_quality = drone.last_wifi_quality;
         updateData.last_4G_quality = drone.last_4G_quality;
@@ -116,8 +210,8 @@ export default defineEventHandler(async (event) => {
         updateData.last_wifi_extra_info = drone.last_wifi_extra_info;
         updateData.last_4G_extra_info = drone.last_4G_extra_info;
     }
-    // 3. 如果无人机此时一定存在，更新其last_xxx参数
 
+    // 根据数据源更新对应的信号质量
     if (validatedData.source.toUpperCase() === "LORA"){
         updateData.last_lora_quality = validatedData.signal_quality;
         updateData.last_lora_extra_info = validatedData.extra_info;
@@ -133,10 +227,12 @@ export default defineEventHandler(async (event) => {
             statusMessage: 'Unsupported source type: ' + validatedData.source,
         })
     }
+
     const { error: updateError } = await client
         .from('drones')
         .update(updateData)
         .eq('id', droneId);
+
     if (updateError) {
         console.error('Error updating drone:', updateError);
         throw createError({
@@ -145,8 +241,7 @@ export default defineEventHandler(async (event) => {
         });
     }
 
-
-    // 4. 插入遥测数据到历史记录表
+    // 4. 插入遥测数据到该无人机的专属历史记录表（通过RPC函数）
     const telemetryData = {
         drone_id: droneId,
         timestamp: validatedData.timestamp,
@@ -161,17 +256,18 @@ export default defineEventHandler(async (event) => {
         extra_info: validatedData.extra_info,
     };
 
-    const { data: telemetryRecord, error: telemetryError } = await client
-        .from('telemetry_history')
-        .insert(telemetryData)
-        .select('id')
-        .single();
+    // 使用RPC函数插入数据，避免schema缓存问题
+    const { data: telemetryRecord, error: telemetryError } = await insertTelemetryViaRPC(
+        client, 
+        tableName, 
+        telemetryData
+    );
 
     if (telemetryError) {
-        console.error('Error inserting telemetry data:', telemetryError);
+        console.error(`Error inserting telemetry data to table ${tableName}:`, telemetryError);
         throw createError({
             statusCode: 500,
-            statusMessage: 'Failed to insert telemetry record.',
+            statusMessage: `Failed to insert telemetry record to table ${tableName}. Error: ${telemetryError.message || telemetryError}`,
         });
     }
 
@@ -179,11 +275,12 @@ export default defineEventHandler(async (event) => {
     event.node.res.statusCode = 201;
     return {
         result: 'ok',
-        telemetry_id: telemetryRecord.id,
+        telemetry_id: telemetryRecord,
         drone_id: droneId,
-        is_new_drone: !existingDrone,
-        message: existingDrone
-            ? `Telemetry data recorded and drone ${droneId} updated.`
-            : `New drone ${droneId} created and telemetry data recorded.`
+        table_name: tableName,
+        is_new_drone: isNewDrone,
+        message: isNewDrone
+            ? `New drone ${droneId} created with table ${tableName} and telemetry data recorded.`
+            : `Telemetry data recorded to table ${tableName} and drone ${droneId} updated.`
     };
 });

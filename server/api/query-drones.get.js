@@ -59,7 +59,6 @@ export default defineEventHandler(async (event) => {
             statusMessage: 'Failed to query drones',
         });
     }
-    console.log(drones);
     // 处理返回数据
     const processedDrones = (drones || []).map((drone) => {
 
@@ -94,7 +93,6 @@ export default defineEventHandler(async (event) => {
             created_at: drone.created_at
         };
     });
-
     return {
         result: 'ok',
         count: processedDrones.length,
