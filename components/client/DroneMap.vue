@@ -506,7 +506,7 @@ const initMap = async () => {
     
     map.value = new AMap.Map('amap-container', {
       zoom: 11,
-      center: [114.1694, 22.3193],
+      center: [114.17, 22.32],
       mapStyle: 'amap://styles/normal'
     })
     
@@ -558,7 +558,7 @@ const loadDronesInBounds = async () => {
         sw_lat: swWgs84.lat,
         ne_lng: neWgs84.lng,
         ne_lat: neWgs84.lat,
-        minutes: 999999
+        minutes: 600 // 10小时内有位置更新的无人机
       }
     })
     
@@ -668,7 +668,7 @@ const updateMarkers = (droneList) => {
       // 更新位置
       const AMap = window.AMap
       existingMarker.setPosition(new AMap.LngLat(drone.last_location_gcj02[0], drone.last_location_gcj02[1]))
-      
+      console.log(`更新无人机 ${drone.id} 位置到 [${drone.last_location_gcj02[0]}, ${drone.last_location_gcj02[1]}]`)
       // 检查是否需要更新标记（信号状态改变）
       const oldData = existingMarker.getExtData()?.droneData
       const counts = signalLostCounts.value.get(drone.id) || { wifi: 0, lora: 0, cellular: 0 }

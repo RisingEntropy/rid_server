@@ -195,7 +195,7 @@ export default defineEventHandler(async (event) => {
         last_satellites: validatedData.satellites,
     };
     // 如果drone.last_report和当前数据不一致，说明是通过不同手段报上来的数据，更新即可，否则，清空last_wifi/lora/4g 字段
-    if(drone.last_report_id === undefined || drone.last_report_id === null || drone.last_report_id !== validatedData.report_id){
+    if(drone.last_report_id === undefined || drone.last_report_id === null || drone.last_report_id < validatedData.report_id){
         updateData.last_lora_quality = null;
         updateData.last_wifi_quality = null;
         updateData.last_4G_quality = null;
