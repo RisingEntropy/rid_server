@@ -558,7 +558,7 @@ const loadDronesInBounds = async () => {
         sw_lat: swWgs84.lat,
         ne_lng: neWgs84.lng,
         ne_lat: neWgs84.lat,
-        minutes: 600 // 10小时内有位置更新的无人机
+        minutes: 60000000 // 10小时内有位置更新的无人机
       }
     })
     

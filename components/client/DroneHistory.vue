@@ -114,7 +114,7 @@
             <el-badge :value="historyData.total_records" type="info" style="margin-left: 10px" />
           </el-radio>
           <el-radio label="WIFI" border style="margin-bottom: 8px; width: 100%">
-            <span>WiFi</span>
+            <span>Wi-Fi</span>
             <span class="color-indicator wifi"></span>
             <el-badge :value="getSourceCount('WIFI')" type="primary" style="margin-left: 10px" />
           </el-radio>
@@ -147,6 +147,24 @@
             <span class="stat-label">显示记录：</span>
             <el-tag :type="filteredPoints.length > 0 ? 'success' : 'warning'">
               {{ filteredPoints.length }}
+            </el-tag>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">Wi-Fi 丢包率：</span>
+            <el-tag :type="filteredPoints.length > 0 ? 'success' : 'warning'">
+              {{ get_packet_loss_rate(filteredPoints, "WIFI") }}
+            </el-tag>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">4G 丢包率：</span>
+            <el-tag :type="filteredPoints.length > 0 ? 'success' : 'warning'">
+              {{ get_packet_loss_rate(filteredPoints, "4G") }}
+            </el-tag>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">LoRa 丢包率：</span>
+            <el-tag :type="filteredPoints.length > 0 ? 'success' : 'warning'">
+              {{ get_packet_loss_rate(filteredPoints, "LORA") }}
             </el-tag>
           </div>
           <div class="stat-item">
@@ -272,7 +290,53 @@ const convertPointCoordinates = (point) => {
     originalLocation: point.location // 保留原始坐标用于调试
   }
 }
-
+function parseCsqToRssi(csq_val) {
+  const rssiVal = csq_val;
+  let rssiInDbm = null;
+  if (rssiVal === 99) {
+    rssiInDbm = null;
+  } else {
+    rssiInDbm = -113 + (2 * rssiVal);
+  }
+  if (csq_val == 31){
+    return ">= -51";
+  }
+  return rssiInDbm;
+}
+const get_packet_loss_rate = (points, source) => {
+  let report_ids = new Array();
+  for (let point in points) {
+    if (points[point].source === source) {
+      report_ids.push(points[point].report_id);
+    }
+  }
+  let sorted_ids = report_ids.sort((a, b) => a - b);
+  let lost_count = 0;
+  let total_count = 0;
+  let segment_start = null;
+  let segment_end = null;
+  for (let i = 1; i < report_ids.length; i++) {
+    if (segment_start === null) {
+      segment_start = sorted_ids[i - 1];
+    }
+    if (sorted_ids[i] - sorted_ids[i - 1] < 3000) { // 只计算一次session内的丢包，不同session的report_id可能相差很大
+      lost_count += (sorted_ids[i] - sorted_ids[i - 1] - 1);
+    }else{
+      segment_end = sorted_ids[i - 1];
+      total_count += (segment_end - segment_start + 1);
+      segment_start = null;
+      segment_end = null;
+    }
+  }
+  if (segment_start !== null) {
+    segment_end = sorted_ids[sorted_ids.length - 1];
+    total_count += (segment_end - segment_start + 1);
+  }
+  if (total_count === 0) {
+    return 'N/A';
+  }
+  return (lost_count / total_count * 100).toFixed(2) + '%';
+}
 // 计算过滤后的轨迹点
 const filteredPoints = computed(() => {
   if (!historyData.value || !historyData.value.telemetry_data) {
@@ -589,7 +653,7 @@ const drawSourceTrajectory = (points, source) => {
             <div><b>速度:</b> ${(data.speed / 3.6).toPrecision(3)} m/s</div>
             <div><b>卫星数:</b> ${data.satellites}</div>
             <div><b>Extra Info:</b> ${JSON.stringify(data.extra_info)}</div>
-            <div><b>信号质量:</b> ${data.signal_quality} ${String(data.source).toUpperCase() === "4G"?" ":"dBm"}</div>
+            <div><b>信号质量:</b> ${String(data.source).toUpperCase() === "4G"? parseCsqToRssi(data.signal_quality): data.signal_quality} dBm</div>
             ${data.originalLocation ? `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee; font-size: 12px; color: #999;">
               <div><b>原始坐标(WGS84):</b></div>
               <div>经度: ${data.originalLocation[0].toFixed(6)}</div>

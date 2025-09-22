@@ -10,6 +10,7 @@ export default defineEventHandler(async (event) => {
     try{
         let rid_info = deserializeRIDInfo(Buffer.from(zhaoteng_payload.data, 'base64'));
         let rssi = zhaoteng_payload.rxInfo[0].rssi;
+        let snr = zhaoteng_payload.rxInfo[0].snr;
         rid_info.signal_quality = rssi;
         rid_info.timestamp = new Date(Number(rid_info.timestamp) * 1000).toISOString();
         let response = await $fetch('/api/update-telemetry-history', {
@@ -30,7 +31,9 @@ export default defineEventHandler(async (event) => {
                 extra_info: {
                     "SF": zhaoteng_payload.txInfo.modulation.lora.spreadingFactor,
                     "BW": zhaoteng_payload.txInfo.modulation.lora.bandwidth,
-                    "CR": zhaoteng_payload.txInfo.modulation.lora.codingRate,
+                    "CR": zhaoteng_payload.txInfo.modulation.lora.codeRate,
+                    "TimeReceived": new Date().toISOString(),
+                    "SNR": snr,
                 }
             })
         });
