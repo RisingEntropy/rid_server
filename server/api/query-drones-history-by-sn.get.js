@@ -53,6 +53,7 @@ function generateTableName(droneId) {
 // 辅助函数：通过RPC查询动态表数据（支持时间范围查询）
 async function queryTelemetryViaRPC(client, tableName, serialNumber, limit, startTime = null, endTime = null) {
     // 根据是否有endTime决定调用哪个RPC函数
+    console.log(`Querying telemetry for table ${tableName} with limit ${limit}, startTime: ${startTime}, endTime: ${endTime}`);
     if (endTime) {
         // 使用时间范围查询的RPC函数
         const { data, error } = await client.rpc('query_telemetry_data_range', {
@@ -62,6 +63,7 @@ async function queryTelemetryViaRPC(client, tableName, serialNumber, limit, star
             p_start_time: startTime,
             p_end_time: endTime
         });
+        console.log(`RPC returned ${data ? data.length : 0} records`);
         return { data, error };
     } else {
         // 使用原有的RPC函数（只有开始时间）

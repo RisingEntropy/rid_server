@@ -12,7 +12,7 @@ export default defineEventHandler(async (event) => {
         let rssi = zhaoteng_payload.rxInfo[0].rssi;
         let snr = zhaoteng_payload.rxInfo[0].snr;
         rid_info.signal_quality = rssi;
-        rid_info.timestamp = new Date(Number(rid_info.timestamp) * 1000).toISOString();
+        rid_info.timestamp = new Date(Number(rid_info.timestamp)).toISOString();
         let response = await $fetch('/api/update-telemetry-history', {
             method: 'POST',
             headers:{
