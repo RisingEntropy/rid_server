@@ -1,4 +1,5 @@
 <template>
+  <!-- 模板部分保持不变 -->
   <div class="drone-history-container">
     <!-- 左侧控制面板 -->
     <div class="control-panel">
@@ -149,6 +150,7 @@
               {{ filteredPoints.length }}
             </el-tag>
           </div>
+          
           <div class="stat-item">
             <span class="stat-label">Wi-Fi 丢包率：</span>
             <el-tag :type="filteredPoints.length > 0 ? 'success' : 'warning'">
@@ -167,6 +169,7 @@
               {{ get_packet_loss_rate(filteredPoints, "LORA") }}
             </el-tag>
           </div>
+        
           <div class="stat-item">
             <span class="stat-label">有效GPS点：</span>
             <el-tag :type="validGPSPoints > 0 ? 'success' : 'danger'">
@@ -195,6 +198,7 @@
     <div id="map-container" class="map-container"></div>
   </div>
 </template>
+
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
@@ -211,9 +215,9 @@ import {
 
 // 响应式数据
 const searchSN = ref('')
-const queryLimit = ref(1000)
+const queryLimit = ref(100000000)
 const timeMode = ref('minutes')
-const recentMinutes = ref(60)
+const recentMinutes = ref(600000000)
 const dateRange = ref([])
 const loading = ref(false)
 const historyData = ref(null)
@@ -290,6 +294,7 @@ const convertPointCoordinates = (point) => {
     originalLocation: point.location // 保留原始坐标用于调试
   }
 }
+
 function parseCsqToRssi(csq_val) {
   const rssiVal = csq_val;
   let rssiInDbm = null;
@@ -303,6 +308,18 @@ function parseCsqToRssi(csq_val) {
   }
   return rssiInDbm;
 }
+
+// 格式化Extra Info，用于显示
+const formatExtraInfo = (extra_info, isExpanded = false) => {
+  const infoStr = JSON.stringify(extra_info)
+  const maxLength = 50
+  
+  if (!isExpanded && infoStr.length > maxLength) {
+    return infoStr.substring(0, maxLength) + '...'
+  }
+  return infoStr
+}
+
 const get_packet_loss_rate = (points, source) => {
   let report_ids = new Array();
   for (let point in points) {
@@ -337,6 +354,7 @@ const get_packet_loss_rate = (points, source) => {
   }
   return (lost_count / total_count * 100).toFixed(2) + '%';
 }
+
 // 计算过滤后的轨迹点
 const filteredPoints = computed(() => {
   if (!historyData.value || !historyData.value.telemetry_data) {
@@ -357,7 +375,9 @@ const filteredPoints = computed(() => {
     return points
   }
   
-  return points.filter(item => item.source === selectedSource.value)
+  return points.filter(item => item.source === selectedSource.value &&
+    Math.abs(item.location[0]>5) && Math.abs(item.location[0]>5)
+  )
 })
 
 // 监听数据源变化，更新轨迹
@@ -484,19 +504,28 @@ const queryHistory = async () => {
     
     ElMessage.info('正在查询轨迹数据...')
     
-    const data = await $fetch('/api/query-drones-history-by-sn', {
+    let data = await $fetch('/api/query-drones-history-by-sn', {
       method: 'GET', params
     })
-    
-    historyData.value = data
+    // remove invalid points in data.telemetry_data
+    const valid_data = data;
+    for (let i = valid_data.telemetry_data.length - 1; i >= 0; i--) {
+      const point = valid_data.telemetry_data[i];
+      if (!point.location || Math.abs(point.location[0]) < 5 || Math.abs( point.location[1]) < 5) {
+        valid_data.telemetry_data.splice(i, 1);
+      }
+    }
+    data = valid_data;
+    historyData.value = valid_data
     selectedSource.value = 'all'
     
     if (data.telemetry_data && data.telemetry_data.length > 0) {
       // 转换坐标后计算有效GPS点数
       const convertedPoints = data.telemetry_data.map(convertPointCoordinates)
       const validPoints = convertedPoints.filter(p => 
-        p.location && p.location[0] !== 0 && p.location[1] !== 0
+        p.location && Math.abs(p.location[0])>5 && Math.abs(p.location[1])>5
       )
+      
       validGPSPoints.value = validPoints.length
       
       ElMessage.success(`查询成功，共 ${data.total_records} 条记录，${validPoints.length} 个有效GPS点`)
@@ -549,8 +578,8 @@ const drawTrajectory = (points) => {
   // 过滤有效坐标点
   const validPoints = points.filter(p => 
     p.location && 
-    p.location[0] !== 0 && 
-    p.location[1] !== 0
+    Math.abs(p.location[0]) > 5&& 
+    Math.abs(p.location[1]) > 5
   )
   
   if (validPoints.length === 0) {
@@ -643,8 +672,23 @@ const drawSourceTrajectory = (points, source) => {
     circle.on('click', (e) => {
       const data = e.target.getExtData()
       console.log('轨迹点数据:', data)
+      
+      // 生成唯一ID用于展开/收起功能
+      const infoId = `info_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const extraInfoStr = JSON.stringify(data.extra_info)
+      const needToggle = extraInfoStr.length > 50
+      
+      // 将数据存储在全局对象中，以便展开/收起时访问
+      if (!window.infoWindowData) {
+        window.infoWindowData = {}
+      }
+      window.infoWindowData[infoId] = {
+        extra_info: data.extra_info,
+        extra_info_str: extraInfoStr
+      }
+      
       const info = `
-        <div style="padding: 10px; min-width: 200px;">
+        <div style="padding: 10px; width: 300px; max-width: 400px;">
           <h4 style="margin: 0 0 10px 0; color: #333;">轨迹点 #${data.index + 1}</h4>
           <div style="line-height: 1.8;">
             <div><b>数据源:</b> <span style="color: ${color}">${data.source}</span></div>
@@ -652,7 +696,18 @@ const drawSourceTrajectory = (points, source) => {
             <div><b>高度:</b> ${data.altitude} m</div>
             <div><b>速度:</b> ${(data.speed / 3.6).toPrecision(3)} m/s</div>
             <div><b>卫星数:</b> ${data.satellites}</div>
-            <div><b>Extra Info:</b> ${JSON.stringify(data.extra_info)}</div>
+            <div style="margin-top: 5px;">
+              <b>Extra Info:</b> 
+              ${needToggle ? `
+                <span class="toggle-trigger" onclick="window.toggleExtraInfo('${infoId}')" style="cursor: pointer; color: #409eff; margin-left: 5px;">
+                  <span id="${infoId}_arrow" style="display: inline-block; transition: transform 0.3s;">▶</span>
+                  <span id="${infoId}_text" style="text-decoration: underline;">展开</span>
+                </span>
+              ` : ''}
+            </div>
+            <div id="${infoId}" style="word-break: break-all; padding: 5px; background: #f5f5f5; border-radius: 4px; margin-top: 5px; ${needToggle ? 'max-height: 50px; overflow: hidden;' : ''}">
+              ${needToggle ? formatExtraInfo(data.extra_info, false) : extraInfoStr}
+            </div>
             <div><b>信号质量:</b> ${String(data.source).toUpperCase() === "4G"? parseCsqToRssi(data.signal_quality): data.signal_quality} dBm</div>
             ${data.originalLocation ? `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee; font-size: 12px; color: #999;">
               <div><b>原始坐标(WGS84):</b></div>
@@ -663,10 +718,47 @@ const drawSourceTrajectory = (points, source) => {
         </div>
       `
       
+      // 添加或更新全局函数用于展开/收起
+      window.toggleExtraInfo = function(id) {
+        const element = document.getElementById(id)
+        const arrow = document.getElementById(id + '_arrow')
+        const text = document.getElementById(id + '_text')
+        const data = window.infoWindowData[id]
+        
+        if (!element || !arrow || !text || !data) {
+          console.error('无法找到元素或数据:', id)
+          return
+        }
+        
+        if (element.style.maxHeight === '50px' || element.style.maxHeight === '') {
+          // 展开
+          element.style.maxHeight = 'none'
+          element.style.overflow = 'visible'
+          element.textContent = data.extra_info_str
+          arrow.style.transform = 'rotate(90deg)'
+          text.textContent = '收起'
+        } else {
+          // 收起
+          element.style.maxHeight = '50px'
+          element.style.overflow = 'hidden'
+          element.textContent = formatExtraInfo(data.extra_info, false)
+          arrow.style.transform = 'rotate(0deg)'
+          text.textContent = '展开'
+        }
+      }
+      
       const infoWindow = new AMap.InfoWindow({
         content: info,
         offset: new AMap.Pixel(0, -20)
       })
+      
+      // 监听信息窗口关闭事件，清理存储的数据
+      infoWindow.on('close', () => {
+        if (window.infoWindowData && window.infoWindowData[infoId]) {
+          delete window.infoWindowData[infoId]
+        }
+      })
+      
       infoWindow.open(map, e.target.getCenter())
     })
     
@@ -810,7 +902,7 @@ const formatDateTimeForPicker = (date) => {
 }
 </script>
 
-<!-- 样式部分保持不变 -->
+<!-- 样式部分保持不变，但需要添加一些新的样式 -->
 <style>
 /* 自定义起终点标记样式 - 放在全局样式中 */
 .custom-marker {
@@ -818,6 +910,7 @@ const formatDateTimeForPicker = (date) => {
   width: 40px;
   height: 40px;
 }
+
 .marker-content {
   width: 40px;
   height: 40px;
@@ -832,14 +925,17 @@ const formatDateTimeForPicker = (date) => {
   position: relative;
   z-index: 2;
 }
+
 .start-marker .marker-content {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   border: 3px solid white;
 }
+
 .end-marker .marker-content {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
   border: 3px solid white;
 }
+
 .marker-tail {
   position: absolute;
   bottom: -8px;
@@ -852,6 +948,7 @@ const formatDateTimeForPicker = (date) => {
   border-top: 10px solid white;
   z-index: 1;
 }
+
 .start-marker .marker-tail::before {
   content: '';
   position: absolute;
@@ -863,6 +960,7 @@ const formatDateTimeForPicker = (date) => {
   border-right: 6px solid transparent;
   border-top: 8px solid #764ba2;
 }
+
 .end-marker .marker-tail::before {
   content: '';
   position: absolute;
@@ -874,6 +972,11 @@ const formatDateTimeForPicker = (date) => {
   border-right: 6px solid transparent;
   border-top: 8px solid #f5576c;
 }
+
+/* 信息窗口内的展开/收起触发器样式 */
+.toggle-trigger:hover {
+  opacity: 0.8;
+}
 </style>
 
 <style scoped>
@@ -884,6 +987,7 @@ const formatDateTimeForPicker = (date) => {
   position: relative;
   background: #f5f7fa;
 }
+
 /* 控制面板样式 */
 .control-panel {
   width: 380px;
@@ -893,6 +997,7 @@ const formatDateTimeForPicker = (date) => {
   overflow-y: auto;
   z-index: 10;
 }
+
 .panel-title {
   margin: 0 0 24px 0;
   font-size: 20px;
@@ -901,9 +1006,11 @@ const formatDateTimeForPicker = (date) => {
   display: flex;
   align-items: center;
 }
+
 .form-group {
   margin-bottom: 24px;
 }
+
 .form-group label {
   display: flex;
   align-items: center;
@@ -913,39 +1020,47 @@ const formatDateTimeForPicker = (date) => {
   font-weight: 500;
   color: #606266;
 }
+
 /* 自动补全样式 */
 .suggestion-item-content {
   padding: 8px 0;
 }
+
 .sn-main {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
 }
+
 .sn-icon {
   color: #409eff;
 }
+
 .sn-text {
   font-size: 14px;
   font-weight: 500;
   color: #303133;
 }
+
 .sn-meta {
   display: flex;
   align-items: center;
   gap: 12px;
   padding-left: 24px;
 }
+
 .last-seen {
   font-size: 12px;
   color: #909399;
 }
+
 /* 数据源选择 */
 .source-filter {
   padding-top: 24px;
   border-top: 1px solid #ebeef5;
 }
+
 /* 颜色指示器 */
 .color-indicator {
   display: inline-block;
@@ -955,19 +1070,24 @@ const formatDateTimeForPicker = (date) => {
   margin-left: 8px;
   vertical-align: middle;
 }
+
 .color-indicator.wifi {
   background-color: #3B82F6;
 }
+
 .color-indicator.lora {
   background-color: #10B981;
 }
+
 .color-indicator.fourG {
   background-color: #F59E0B;
 }
+
 /* 统计信息 */
 .stats {
   margin-top: 24px;
 }
+
 .stats-header {
   display: flex;
   align-items: center;
@@ -975,45 +1095,55 @@ const formatDateTimeForPicker = (date) => {
   font-weight: 500;
   color: #303133;
 }
+
 .stat-item {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
 }
+
 .stat-item:last-child {
   margin-bottom: 0;
 }
+
 .stat-label {
   font-size: 14px;
   color: #606266;
 }
+
 /* 地图容器 */
 .map-container {
   flex: 1;
   height: 100%;
   position: relative;
 }
+
 /* Element Plus 组件样式覆盖 */
 :deep(.el-autocomplete) {
   width: 100%;
 }
+
 :deep(.el-radio.is-bordered) {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
+
 :deep(.el-badge__content) {
   transform: translateY(-50%) translateX(50%) scale(0.9);
 }
+
 :deep(.el-card) {
   border: none;
   background: #f8f9fa;
 }
+
 :deep(.el-card__header) {
   padding: 12px 16px;
   background: white;
 }
+
 :deep(.el-card__body) {
   padding: 16px;
 }

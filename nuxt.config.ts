@@ -2,7 +2,8 @@
 export default defineNuxtConfig({
     modules: [
         '@nuxtjs/supabase',
-        '@element-plus/nuxt'
+        '@element-plus/nuxt',
+        
     ],
     supabase: {
         // Options
