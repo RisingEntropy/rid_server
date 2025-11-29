@@ -1,5 +1,4 @@
 <template>
-  <!-- 模板部分保持不变 -->
   <div class="drone-history-container">
     <!-- 左侧控制面板 -->
     <div class="control-panel">
@@ -45,6 +44,7 @@
           </template>
         </el-autocomplete>
       </div>
+      
       <!-- 查询条数 -->
       <div class="form-group">
         <label>
@@ -59,6 +59,7 @@
           style="width: 100%"
         />
       </div>
+      
       <!-- 时间范围选择 -->
       <div class="form-group">
         <label>
@@ -91,6 +92,7 @@
           />
         </div>
       </div>
+      
       <!-- 查询按钮 -->
       <el-button
         type="primary"
@@ -103,6 +105,61 @@
         <el-icon style="margin-right: 5px"><Search /></el-icon>
         {{ loading ? '查询中...' : '查询轨迹' }}
       </el-button>
+      
+      <!-- 测距工具控制 -->
+      <div class="form-group distance-tool-group" v-if="map">
+        <label>
+          <el-icon><Coordinate /></el-icon>
+          测距工具
+        </label>
+        <el-button-group style="width: 100%">
+          <el-button 
+            :type="isDistanceToolActive ? 'primary' : 'default'"
+            @click="toggleDistanceTool"
+            style="flex: 1"
+          >
+            <el-icon><Coordinate /></el-icon>
+            {{ isDistanceToolActive ? '关闭测距' : '开启测距' }}
+          </el-button>
+          <el-button 
+            @click="clearDistanceMarkers"
+            :disabled="!distanceMarkers.length"
+            style="flex: 1"
+          >
+            <el-icon><Delete /></el-icon>
+            清除标记
+          </el-button>
+        </el-button-group>
+        
+        <!-- 显示测距结果 -->
+        <div v-if="distanceResults.length > 0" class="distance-results">
+          <el-card shadow="never" style="margin-top: 12px">
+            <template #header>
+              <div class="stats-header">
+                <el-icon><DataAnalysis /></el-icon>
+                <span>测距结果</span>
+              </div>
+            </template>
+            <div v-for="(result, index) in distanceResults" :key="index" class="distance-item">
+              <span>路径 {{ index + 1 }}:</span>
+              <el-tag type="success">{{ formatDistance(result.distance) }}</el-tag>
+              <el-button 
+                text 
+                type="danger" 
+                size="small"
+                @click="removeDistancePath(index)"
+              >
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </div>
+            <div v-if="totalDistance > 0" class="distance-item total">
+              <span><strong>总距离:</strong></span>
+              <el-tag type="warning">{{ formatDistance(totalDistance) }}</el-tag>
+            </div>
+          </el-card>
+        </div>
+      </div>
+      
       <!-- 数据源选择 -->
       <div v-if="historyData" class="form-group source-filter">
         <label>
@@ -131,6 +188,7 @@
           </el-radio>
         </el-radio-group>
       </div>
+      
       <!-- 查询结果统计 -->
       <div v-if="historyData" class="stats">
         <el-card shadow="never">
@@ -194,13 +252,29 @@
         </el-card>
       </div>
     </div>
+    
     <!-- 地图容器 -->
-    <div id="map-container" class="map-container"></div>
+    <div id="map-container" class="map-container">
+      <!-- 测距提示信息 -->
+      <div v-if="isDistanceToolActive" class="distance-tip">
+        <el-alert
+          title="测距模式"
+          type="info"
+          :closable="false"
+          show-icon
+        >
+          <template #default>
+            <div>右键点击地图添加测距点，左键点击完成当前路径测量</div>
+            <div>按 ESC 键退出测距模式</div>
+          </template>
+        </el-alert>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import AMapLoader from '@amap/amap-jsapi-loader'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
@@ -210,7 +284,9 @@ import {
   Filter, 
   DataAnalysis,
   Promotion,
-  DataLine
+  DataLine,
+  Delete,
+  Coordinate
 } from '@element-plus/icons-vue'
 
 // 响应式数据
@@ -224,12 +300,22 @@ const historyData = ref(null)
 const selectedSource = ref('all')
 const validGPSPoints = ref(0)
 
+// 测距相关的响应式数据
+const isDistanceToolActive = ref(false)
+const distanceMarkers = ref([])
+const distancePolylines = ref([])
+const distanceResults = ref([])
+const currentDistancePoints = ref([])
+const currentDistancePolyline = ref(null)
+const distanceInfoWindows = ref([])
+
 // 地图相关
 let map = null
 let AMap = null  // 保存AMap类引用
 let polylines = []
 let markers = []
 let circleMarkers = []
+let contextMenu = null
 
 // 数据源颜色配置
 const SOURCE_COLORS = {
@@ -237,6 +323,11 @@ const SOURCE_COLORS = {
   'LORA': '#10B981',
   '4G': '#F59E0B'
 }
+
+// 计算总距离
+const totalDistance = computed(() => {
+  return distanceResults.value.reduce((sum, result) => sum + result.distance, 0)
+})
 
 // WGS84(谷歌地图) 转 GCJ02(高德地图) 的转换函数
 const wgs84ToGcj02 = (lng, lat) => {
@@ -405,7 +496,9 @@ onMounted(async () => {
         'AMap.Polyline', 
         'AMap.CircleMarker',
         'AMap.InfoWindow',
-        'AMap.Icon'
+        'AMap.Icon',
+        'AMap.ContextMenu',  // 添加右键菜单插件
+        'AMap.Text'          // 添加文本标记插件
       ]
     })
     
@@ -421,6 +514,12 @@ onMounted(async () => {
       position: 'RT'
     }))
     
+    // 初始化右键菜单
+    initContextMenu()
+    
+    // 添加键盘事件监听
+    document.addEventListener('keydown', handleKeyDown)
+    
     ElMessage.success('地图加载成功')
   } catch (error) {
     console.error('地图加载失败:', error)
@@ -435,6 +534,272 @@ onMounted(async () => {
     formatDateTimeForPicker(now)
   ]
 })
+
+// 组件卸载时清理
+onUnmounted(() => {
+  document.removeEventListener('keydown', handleKeyDown)
+  if (contextMenu) {
+    contextMenu.close()
+  }
+})
+
+// 初始化右键菜单
+const initContextMenu = () => {
+  if (!AMap || !map) return
+  
+  contextMenu = new AMap.ContextMenu()
+  
+  // 添加测距菜单项
+  contextMenu.addItem("开始测距", () => {
+    isDistanceToolActive.value = true
+    ElMessage.info('测距模式已开启，右键点击添加测距点')
+  }, 0)
+  
+  contextMenu.addItem("清除测距", () => {
+    clearDistanceMarkers()
+  }, 1)
+  
+  // 默认绑定到地图
+  map.on('rightclick', (e) => {
+    if (isDistanceToolActive.value) {
+      // 测距模式下，右键添加测距点
+      addDistancePoint(e.lnglat)
+    } else {
+      // 非测距模式下，显示右键菜单
+      contextMenu.open(map, e.lnglat)
+    }
+  })
+  
+  // 左键点击事件
+  map.on('click', (e) => {
+    if (isDistanceToolActive.value && currentDistancePoints.value.length > 0) {
+      // 完成当前路径的测量
+      finishCurrentDistance()
+    }
+  })
+}
+
+// 切换测距工具
+const toggleDistanceTool = () => {
+  isDistanceToolActive.value = !isDistanceToolActive.value
+  
+  if (isDistanceToolActive.value) {
+    ElMessage.info('测距模式已开启，右键点击添加测距点')
+    // 设置鼠标样式
+    map.setDefaultCursor('crosshair')
+  } else {
+    ElMessage.info('测距模式已关闭')
+    // 恢复鼠标样式
+    map.setDefaultCursor('default')
+    // 如果有未完成的测距，完成它
+    if (currentDistancePoints.value.length > 0) {
+      finishCurrentDistance()
+    }
+  }
+}
+
+// 添加测距点
+const addDistancePoint = (lnglat) => {
+  if (!AMap || !map) return
+  
+  const position = [lnglat.lng, lnglat.lat]
+  
+  // 创建标记点
+  const marker = new AMap.Marker({
+    position: position,
+    icon: new AMap.Icon({
+      size: new AMap.Size(25, 25),
+      image: 'data:image/svg+xml;base64,' + btoa(`
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#FF6B6B">
+          <circle cx="12" cy="12" r="8" fill="#FF6B6B" stroke="white" stroke-width="2"/>
+          <text x="12" y="16" text-anchor="middle" fill="white" font-size="12" font-weight="bold">
+            ${currentDistancePoints.value.length + 1}
+          </text>
+        </svg>
+      `),
+      imageSize: new AMap.Size(25, 25),
+      anchor: 'center'
+    }),
+    offset: new AMap.Pixel(0, 0),
+    zIndex: 100
+  })
+  
+  map.add(marker)
+  distanceMarkers.value.push(marker)
+  currentDistancePoints.value.push(position)
+  
+  // 如果有2个或更多点，绘制连线并显示距离
+  if (currentDistancePoints.value.length >= 2) {
+    updateDistanceLine()
+  }
+  
+  // 显示提示
+  if (currentDistancePoints.value.length === 1) {
+    ElMessage.success('已添加第一个测距点，继续右键添加下一个点')
+  }
+}
+
+// 更新测距线
+const updateDistanceLine = () => {
+  if (!AMap || !map) return
+  
+  // 移除旧的线
+  if (currentDistancePolyline.value) {
+    map.remove(currentDistancePolyline.value)
+  }
+  
+  // 创建新的线
+  currentDistancePolyline.value = new AMap.Polyline({
+    path: currentDistancePoints.value,
+    strokeColor: '#FF6B6B',
+    strokeWeight: 3,
+    strokeOpacity: 0.8,
+    strokeStyle: 'dashed',
+    zIndex: 90
+  })
+  
+  map.add(currentDistancePolyline.value)
+  
+  // 计算并显示当前距离
+  const distance = calculatePathDistance(currentDistancePoints.value)
+  
+  // 在最后一个点显示距离
+  const lastPoint = currentDistancePoints.value[currentDistancePoints.value.length - 1]
+  const distanceText = new AMap.Text({
+    text: formatDistance(distance),
+    position: lastPoint,
+    offset: new AMap.Pixel(10, -10),
+    style: {
+      'background-color': 'white',
+      'border': '1px solid #FF6B6B',
+      'padding': '4px 8px',
+      'border-radius': '4px',
+      'font-size': '12px',
+      'color': '#FF6B6B',
+      'font-weight': 'bold'
+    },
+    zIndex: 101
+  })
+  
+  map.add(distanceText)
+  distanceInfoWindows.value.push(distanceText)
+}
+
+// 完成当前测距
+const finishCurrentDistance = () => {
+  if (currentDistancePoints.value.length < 2) {
+    ElMessage.warning('至少需要两个点才能完成测距')
+    return
+  }
+  
+  const distance = calculatePathDistance(currentDistancePoints.value)
+  
+  // 保存结果
+  distanceResults.value.push({
+    points: [...currentDistancePoints.value],
+    distance: distance,
+    polyline: currentDistancePolyline.value,
+    markers: distanceMarkers.value.slice(-currentDistancePoints.value.length)
+  })
+  
+  // 重置当前测距
+  currentDistancePoints.value = []
+  currentDistancePolyline.value = null
+  
+  ElMessage.success(`路径测量完成，距离: ${formatDistance(distance)}`)
+}
+
+// 计算路径距离
+const calculatePathDistance = (points) => {
+  if (!AMap || points.length < 2) return 0
+  
+  let totalDistance = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const lnglat1 = new AMap.LngLat(points[i][0], points[i][1])
+    const lnglat2 = new AMap.LngLat(points[i + 1][0], points[i + 1][1])
+    totalDistance += lnglat1.distance(lnglat2)
+  }
+  
+  return totalDistance
+}
+
+// 格式化距离显示
+const formatDistance = (distance) => {
+  if (distance < 1000) {
+    return `${distance.toFixed(2)} 米`
+  } else {
+    return `${(distance / 1000).toFixed(2)} 公里`
+  }
+}
+
+// 清除所有测距标记
+const clearDistanceMarkers = () => {
+  if (!map) return
+  
+  // 清除所有标记
+  distanceMarkers.value.forEach(marker => {
+    map.remove(marker)
+  })
+  distanceMarkers.value = []
+  
+  // 清除所有线
+  distanceResults.value.forEach(result => {
+    if (result.polyline) {
+      map.remove(result.polyline)
+    }
+  })
+  
+  // 清除当前正在绘制的线
+  if (currentDistancePolyline.value) {
+    map.remove(currentDistancePolyline.value)
+    currentDistancePolyline.value = null
+  }
+  
+  // 清除距离文本
+  distanceInfoWindows.value.forEach(text => {
+    map.remove(text)
+  })
+  distanceInfoWindows.value = []
+  
+  // 重置数据
+  distanceResults.value = []
+  currentDistancePoints.value = []
+  
+  ElMessage.success('已清除所有测距标记')
+}
+
+// 移除指定的测距路径
+const removeDistancePath = (index) => {
+  if (!map) return
+  
+  const result = distanceResults.value[index]
+  
+  // 移除标记
+  result.markers.forEach(marker => {
+    map.remove(marker)
+    const idx = distanceMarkers.value.indexOf(marker)
+    if (idx > -1) {
+      distanceMarkers.value.splice(idx, 1)
+    }
+  })
+  
+  // 移除线
+  if (result.polyline) {
+    map.remove(result.polyline)
+  }
+  
+  // 移除结果
+  distanceResults.value.splice(index, 1)
+  
+  ElMessage.success('已移除测距路径')
+}
+
+// 处理键盘事件
+const handleKeyDown = (e) => {
+  if (e.key === 'Escape' && isDistanceToolActive.value) {
+    toggleDistanceTool()
+  }
+}
 
 // 处理序列号搜索
 const handleSNSearch = async (queryString, cb) => {
@@ -507,6 +872,7 @@ const queryHistory = async () => {
     let data = await $fetch('/api/query-drones-history-by-sn', {
       method: 'GET', params
     })
+    
     // remove invalid points in data.telemetry_data
     const valid_data = data;
     for (let i = valid_data.telemetry_data.length - 1; i >= 0; i--) {
@@ -902,7 +1268,7 @@ const formatDateTimeForPicker = (date) => {
 }
 </script>
 
-<!-- 样式部分保持不变，但需要添加一些新的样式 -->
+<!-- 样式部分 -->
 <style>
 /* 自定义起终点标记样式 - 放在全局样式中 */
 .custom-marker {
@@ -1021,6 +1387,48 @@ const formatDateTimeForPicker = (date) => {
   color: #606266;
 }
 
+/* 测距工具组 */
+.distance-tool-group {
+  padding-top: 24px;
+  border-top: 1px solid #ebeef5;
+}
+
+/* 测距相关样式 */
+.distance-tip {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  max-width: 400px;
+}
+
+.distance-results {
+  margin-top: 12px;
+}
+
+.distance-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 8px;
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+
+.distance-item.total {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e4e7ed;
+  background: transparent;
+}
+
+.distance-item span {
+  font-size: 14px;
+  color: #606266;
+}
+
 /* 自动补全样式 */
 .suggestion-item-content {
   padding: 8px 0;
@@ -1117,6 +1525,11 @@ const formatDateTimeForPicker = (date) => {
   flex: 1;
   height: 100%;
   position: relative;
+}
+
+/* 测距模式下的鼠标样式 */
+.map-container.measuring {
+  cursor: crosshair !important;
 }
 
 /* Element Plus 组件样式覆盖 */

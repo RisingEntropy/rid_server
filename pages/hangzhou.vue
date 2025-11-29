@@ -11,11 +11,11 @@
 
 <script setup>
 // 不需要手动导入，Nuxt 3 会自动导入
-import DroneMap from '~/components/client/DroneMapLoRa.vue'
+import DroneMap from '~/components/client/Hangzhou.vue'
 useHead({
-  title: '无人机监控地图',
+  title: 'LoRa速率测试',
   meta: [
-    { name: 'description', content: '实时无人机位置监控' }
+    { name: 'description', content: 'LoRa速率测试' }
   ]
 })
 

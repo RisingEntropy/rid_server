@@ -22,15 +22,6 @@
           </div>
           <span v-if="fileName" class="file-name">当前文件: {{ fileName }}</span>
         </div>
-        <!-- 特征选择 -->
-        <div v-if="features.length > 0" class="feature-select">
-          <label>选择特征：</label>
-          <select v-model="selectedFeature" @change="updateChart">
-            <option v-for="feature in features" :key="feature" :value="feature">
-              {{ feature }}
-            </option>
-          </select>
-        </div>
       </div>
       <!-- 睡眠阶段选择 -->
       <div v-if="dataLoaded" class="stage-selection">
@@ -47,15 +38,43 @@
           </label>
         </div>
       </div>
-      <!-- 图表区域 -->
-      <div v-if="dataLoaded" class="chart-container">
-        <div class="canvas-wrapper">
-          <canvas ref="chartCanvas"></canvas>
-          <div 
-            v-if="isSelecting" 
-            class="selection-overlay"
-            :style="selectionStyle"
-          ></div>
+      <!-- 多曲线管理 -->
+      <div v-if="dataLoaded" class="charts-manager">
+        <div class="charts-header">
+          <h3>数据曲线</h3>
+          <button @click="addChart" class="btn-add-chart" :disabled="chartConfigs.length >= features.length">
+            <span class="add-icon">+</span> 添加曲线
+          </button>
+        </div>
+        <!-- 垂直排列的图表区域 -->
+        <div class="charts-vertical">
+          <div v-for="(config, index) in chartConfigs" :key="config.id" class="chart-item-vertical">
+            <div class="chart-header">
+              <select v-model="config.selectedFeature" @change="updateChart(index)" class="feature-selector">
+                <option v-for="feature in getAvailableFeatures(index)" :key="feature" :value="feature">
+                  {{ feature }}
+                </option>
+              </select>
+              <button 
+                v-if="chartConfigs.length > 1" 
+                @click="removeChart(index)" 
+                class="btn-remove-chart"
+                title="删除曲线"
+              >
+                ×
+              </button>
+            </div>
+            <div class="chart-container-vertical">
+              <div class="canvas-wrapper">
+                <canvas :ref="'chartCanvas_' + index"></canvas>
+                <div 
+                  v-if="isSelecting && activeChartIndex === index" 
+                  class="selection-overlay"
+                  :style="getSelectionStyle(index)"
+                ></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <!-- 操作按钮 -->
@@ -81,8 +100,8 @@
             <span class="stage-label" :style="{backgroundColor: stages.find(s => s.value === ann.stage)?.color + '20', color: stages.find(s => s.value === ann.stage)?.color}">
               {{ stages.find(s => s.value === ann.stage)?.label }}
             </span>
-            <span class="range">[{{ ann.start }} - {{ ann.end }}]</span>
-            <span class="duration">({{ ann.end - ann.start + 1 }}点)</span>
+            <span class="range">[{{ formatTime(ann.start) }} - {{ formatTime(ann.end) }}]</span>
+            <span class="duration">({{ formatDuration(ann.end - ann.start + 1) }})</span>
             <button @click="removeAnnotation(index)" class="btn-small">删除</button>
           </div>
         </div>
@@ -93,14 +112,12 @@
       <div class="modal-content modal-large">
         <h3>标注对比分析</h3>
         
-        <!-- 当前选择的阶段 -->
         <div class="current-stage-info">
           <strong>分析阶段：</strong>
           <span :style="{color: stages.find(s => s.value === selectedStage)?.color, fontSize: '18px', fontWeight: 'bold'}">
             {{ getCurrentStageName() }}
           </span>
         </div>
-        <!-- 对比图表 - 修改为垂直布局 -->
         <div class="comparison-charts-vertical">
           <div class="chart-section">
             <h4>标签曲线（Ground Truth）</h4>
@@ -111,7 +128,6 @@
             <canvas ref="annComparisonCanvas"></canvas>
           </div>
         </div>
-        <!-- 统计信息 -->
         <div class="comparison-stats">
           <h4>统计分析</h4>
           <div class="stats-grid">
@@ -135,7 +151,6 @@
               <div class="stat-value">{{ comparisonStats.totalPoints }} 点</div>
             </div>
           </div>
-          <!-- 详细对比表格 -->
           <div class="comparison-table">
             <h4>各阶段详细对比</h4>
             <table>
@@ -201,10 +216,13 @@ export default {
       fileName: '',
       npzData: null,
       features: [],
-      selectedFeature: '',
       dataLoaded: false,
       groundTruth: null,
-      currentFeatureData: null,
+      
+      // 多图表配置
+      chartConfigs: [],
+      charts: {},
+      chartIdCounter: 0,
       
       stages: [
         { value: 0, label: 'Wake', color: '#FF6B6B' },
@@ -214,13 +232,13 @@ export default {
       ],
       selectedStage: 0,
       
-      chart: null,
       gtChart: null,
       gtComparisonChart: null,
       annComparisonChart: null,
       annotations: [],
       
       isSelecting: false,
+      activeChartIndex: null,
       selectionStartX: null,
       selectionEndX: null,
       
@@ -237,47 +255,88 @@ export default {
       
       stageComparison: {},
       
-      // 存储事件处理函数的引用
-      mouseDownHandler: null,
-      mouseMoveHandler: null,
-      mouseUpHandler: null,
-      mouseLeaveHandler: null
+      mouseHandlers: {},
+      
+      // 时间相关配置
+      totalHours: 8, // 总时长8小时
+      samplingRate: 256 // 每小时的采样点数 (2048点/8小时)
     };
   },
-  computed: {
-    selectionStyle() {
-      if (!this.isSelecting || !this.chart) return {};
-      
-      const chartArea = this.chart.chartArea;
-      if (!chartArea) return {};
-      
-      const canvasRect = this.$refs.chartCanvas?.getBoundingClientRect();
-      if (!canvasRect) return {};
-      
-      // 使用相对于canvas的位置
-      const left = Math.min(this.selectionStartX, this.selectionEndX) - canvasRect.left;
-      const width = Math.abs(this.selectionEndX - this.selectionStartX);
+  
+  methods: {
+    // 将采样点索引转换为时间（小时）
+    indexToTime(index) {
+      return (index / this.samplingRate).toFixed(2);
+    },
+    
+    // 格式化时间显示
+    formatTime(index) {
+      const hours = Math.floor(index / this.samplingRate);
+      const minutes = Math.floor(((index % this.samplingRate) / this.samplingRate) * 60);
+      return `${hours}h${minutes.toString().padStart(2, '0')}m`;
+    },
+    
+    // 格式化持续时间
+    formatDuration(points) {
+      const totalMinutes = Math.floor((points / this.samplingRate) * 60);
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      if (hours > 0) {
+        return `${hours}h${minutes}m`;
+      }
+      return `${minutes}m`;
+    },
+    
+    // 生成时间标签 - 为每个数据点生成标签
+    generateTimeLabels(dataLength) {
+      const labels = [];
+      for (let i = 0; i < dataLength; i++) {
+        labels.push(i); // 直接使用索引作为标签
+      }
+      return labels;
+    },
+    
+    // 生成X轴配置
+    generateXAxisConfig(dataLength) {
+      const pointsPerHour = dataLength / this.totalHours;
       
       return {
-        left: `${left}px`,
-        width: `${width}px`,
-        top: `${chartArea.top}px`,
-        height: `${chartArea.bottom - chartArea.top}px`,
-        backgroundColor: this.stages.find(s => s.value === this.selectedStage)?.color + '30',
-        position: 'absolute',
-        pointerEvents: 'none',
-        borderColor: this.stages.find(s => s.value === this.selectedStage)?.color
+        display: true,
+        title: {
+          display: true,
+          text: '时间（小时）'
+        },
+        ticks: {
+          maxTicksLimit: 9, // 显示9个刻度（0-8小时）
+          callback: function(value, index, ticks) {
+            // value 是实际的数据点索引
+            const hour = value / pointsPerHour;
+            // 只在整小时位置显示刻度
+            if (hour % 1 === 0 && hour <= 8) {
+              return hour + 'h';
+            }
+            return '';
+          },
+          autoSkip: false,
+          maxRotation: 0,
+          minRotation: 0
+        },
+        grid: {
+          display: true,
+          drawOnChartArea: true,
+          drawTicks: true,
+          color: function(context) {
+            // 在整小时位置显示更明显的网格线
+            const hour = context.tick.value / pointsPerHour;
+            if (hour % 1 === 0) {
+              return 'rgba(0, 0, 0, 0.1)';
+            }
+            return 'rgba(0, 0, 0, 0.05)';
+          }
+        }
       };
-    }
-  },
-  mounted() {
-    // 绑定事件处理函数
-    this.mouseDownHandler = this.handleMouseDown.bind(this);
-    this.mouseMoveHandler = this.handleMouseMove.bind(this);
-    this.mouseUpHandler = this.handleMouseUp.bind(this);
-    this.mouseLeaveHandler = this.handleMouseLeave.bind(this);
-  },
-  methods: {
+    },
+    
     async handleFileUpload(event) {
       const file = event.target.files[0];
       if (!file) return;
@@ -304,11 +363,15 @@ export default {
         this.features = Object.keys(data).filter(key => key !== 'gt');
         this.npzData = data;
         
+        // 根据数据长度更新采样率
+        if (this.groundTruth && this.groundTruth.length > 0) {
+          this.samplingRate = this.groundTruth.length / this.totalHours;
+        }
+        
         if (this.features.length > 0) {
-          this.selectedFeature = this.features[0];
           this.dataLoaded = true;
           await this.$nextTick();
-          this.updateChart();
+          this.initializeCharts();
         }
       } catch (error) {
         console.error('Error loading JSON file:', error);
@@ -339,11 +402,15 @@ export default {
         this.features = headers.filter(h => !['gt', 'GT', 'label', 'labels'].includes(h));
         this.npzData = data;
         
+        // 根据数据长度更新采样率
+        if (this.groundTruth && this.groundTruth.length > 0) {
+          this.samplingRate = this.groundTruth.length / this.totalHours;
+        }
+        
         if (this.features.length > 0) {
-          this.selectedFeature = this.features[0];
           this.dataLoaded = true;
           await this.$nextTick();
-          this.updateChart();
+          this.initializeCharts();
         }
       } catch (error) {
         console.error('Error loading text file:', error);
@@ -357,9 +424,9 @@ export default {
     },
     
     async loadDemoData() {
-      const length = 2048;
+      const length = 2048; // 8小时的数据点
+      this.samplingRate = length / this.totalHours; // 256点/小时
       
-      // 生成更真实的睡眠阶段数据
       this.groundTruth = [];
       let currentStage = 0;
       let stageLength = 0;
@@ -373,7 +440,6 @@ export default {
         stageLength--;
       }
       
-      // 生成模拟的WiFi CSI特征
       this.features = ['amplitude', 'phase', 'subcarrier_1', 'subcarrier_2', 'subcarrier_3'];
       this.npzData = { gt: this.groundTruth };
       
@@ -389,27 +455,92 @@ export default {
         });
       });
       
-      this.selectedFeature = this.features[0];
       this.dataLoaded = true;
       this.fileName = '示例数据';
       
       await this.$nextTick();
-      this.updateChart();
+      this.initializeCharts();
     },
     
-    updateChart() {
-      if (!this.selectedFeature || !this.npzData) return;
+    initializeCharts() {
+      // 清理旧的图表
+      this.clearAllCharts();
       
-      this.currentFeatureData = this.npzData[this.selectedFeature];
-      this.createChart();
+      // 初始化一个默认图表
+      this.addChart();
     },
     
-    async createChart() {
+    addChart() {
+      const id = this.chartIdCounter++;
+      const availableFeatures = this.getAvailableFeatures(this.chartConfigs.length);
+      
+      if (availableFeatures.length === 0) {
+        alert('没有更多可用的特征');
+        return;
+      }
+      
+      const config = {
+        id: id,
+        selectedFeature: availableFeatures[0]
+      };
+      
+      this.chartConfigs.push(config);
+      
+      this.$nextTick(() => {
+        this.createChart(this.chartConfigs.length - 1);
+      });
+    },
+    
+    removeChart(index) {
+      if (this.chartConfigs.length <= 1) {
+        alert('至少需要保留一个曲线');
+        return;
+      }
+      
+      const chartId = this.chartConfigs[index].id;
+      
+      // 销毁图表
+      if (this.charts[chartId]) {
+        this.removeMouseEvents(index);
+        this.charts[chartId].destroy();
+        delete this.charts[chartId];
+      }
+      
+      // 移除配置
+      this.chartConfigs.splice(index, 1);
+      
+      // 更新所有剩余图表
+      this.$nextTick(() => {
+        this.updateAllCharts();
+      });
+    },
+    
+    getAvailableFeatures(currentIndex) {
+      const usedFeatures = this.chartConfigs
+        .filter((_, idx) => idx !== currentIndex)
+        .map(config => config.selectedFeature);
+      
+      return this.features.filter(feature => !usedFeatures.includes(feature));
+    },
+    
+    updateChart(index) {
+      this.createChart(index);
+    },
+    
+    updateAllCharts() {
+      this.chartConfigs.forEach((_, index) => {
+        this.createChart(index);
+      });
+    },
+    
+    async createChart(index) {
       await this.$nextTick();
       
-      const canvas = this.$refs.chartCanvas;
+      const config = this.chartConfigs[index];
+      const canvas = this.$refs['chartCanvas_' + index]?.[0];
+      
       if (!canvas) {
-        console.error('Canvas element not found');
+        console.error('Canvas element not found for index:', index);
         return;
       }
       
@@ -420,15 +551,17 @@ export default {
       }
       
       // 销毁旧图表
-      if (this.chart) {
-        this.removeMouseEvents();
-        this.chart.destroy();
-        this.chart = null;
+      if (this.charts[config.id]) {
+        this.removeMouseEvents(index);
+        this.charts[config.id].destroy();
       }
       
+      const currentFeatureData = this.npzData[config.selectedFeature];
+      const timeLabels = this.generateTimeLabels(currentFeatureData.length);
+      
       const datasets = [{
-        label: this.selectedFeature,
-        data: this.currentFeatureData,
+        label: config.selectedFeature,
+        data: currentFeatureData,
         borderColor: '#2563eb',
         backgroundColor: 'rgba(37, 99, 235, 0.1)',
         borderWidth: 1,
@@ -436,13 +569,13 @@ export default {
         tension: 0.1
       }];
       
-      // 添加标注区间（不使用动画）
+      // 添加标注区间
       this.annotations.forEach((ann, idx) => {
         const color = this.stages.find(s => s.value === ann.stage)?.color || '#000';
         datasets.push({
           label: `${this.stages.find(s => s.value === ann.stage)?.label}_${idx + 1}`,
-          data: Array.from({ length: this.currentFeatureData.length }, (_, i) => {
-            return (i >= ann.start && i <= ann.end) ? this.currentFeatureData[i] : null;
+          data: Array.from({ length: currentFeatureData.length }, (_, i) => {
+            return (i >= ann.start && i <= ann.end) ? currentFeatureData[i] : null;
           }),
           borderColor: color,
           backgroundColor: color + '40',
@@ -452,16 +585,16 @@ export default {
         });
       });
       
-      this.chart = new Chart(ctx, {
+      this.charts[config.id] = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: Array.from({ length: this.currentFeatureData.length }, (_, i) => i),
+          labels: timeLabels,
           datasets: datasets
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          animation: false, // 禁用动画
+          animation: false,
           transitions: {
             active: {
               animation: {
@@ -476,7 +609,7 @@ export default {
           plugins: {
             zoom: {
               limits: {
-                x: {min: 0, max: this.currentFeatureData.length - 1},
+                x: {min: 0, max: currentFeatureData.length - 1},
               },
               pan: {
                 enabled: true,
@@ -502,20 +635,20 @@ export default {
               }
             },
             tooltip: {
-              enabled: false  // 禁用提示框
+              enabled: true,
+              callbacks: {
+                title: (context) => {
+                  const index = context[0].dataIndex;
+                  return `时间: ${this.formatTime(index)}`;
+                },
+                label: (context) => {
+                  return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}`;
+                }
+              }
             }
           },
           scales: {
-            x: {
-              display: true,
-              title: {
-                display: true,
-                text: '采样点'
-              },
-              ticks: {
-                maxTicksLimit: 20
-              }
-            },
+            x: this.generateXAxisConfig(currentFeatureData.length),
             y: {
               display: true,
               title: {
@@ -527,75 +660,92 @@ export default {
         }
       });
       
-      // 设置鼠标事件
       await this.$nextTick();
-      this.setupMouseEvents();
+      this.setupMouseEvents(index);
     },
     
-    setupMouseEvents() {
-      const canvas = this.$refs.chartCanvas;
+    setupMouseEvents(index) {
+      const canvas = this.$refs['chartCanvas_' + index]?.[0];
       if (!canvas) return;
       
-      // 移除旧的事件监听器
-      this.removeMouseEvents();
+      this.removeMouseEvents(index);
       
-      // 添加新的事件监听器
-      canvas.addEventListener('mousedown', this.mouseDownHandler);
-      canvas.addEventListener('mousemove', this.mouseMoveHandler);
-      canvas.addEventListener('mouseup', this.mouseUpHandler);
-      canvas.addEventListener('mouseleave', this.mouseLeaveHandler);
+      const handlers = {
+        mousedown: (e) => this.handleMouseDown(e, index),
+        mousemove: (e) => this.handleMouseMove(e, index),
+        mouseup: (e) => this.handleMouseUp(e, index),
+        mouseleave: (e) => this.handleMouseLeave(e, index)
+      };
+      
+      this.mouseHandlers[index] = handlers;
+      
+      canvas.addEventListener('mousedown', handlers.mousedown);
+      canvas.addEventListener('mousemove', handlers.mousemove);
+      canvas.addEventListener('mouseup', handlers.mouseup);
+      canvas.addEventListener('mouseleave', handlers.mouseleave);
     },
     
-    removeMouseEvents() {
-      const canvas = this.$refs.chartCanvas;
-      if (!canvas) return;
+    removeMouseEvents(index) {
+      const canvas = this.$refs['chartCanvas_' + index]?.[0];
+      if (!canvas || !this.mouseHandlers[index]) return;
       
-      canvas.removeEventListener('mousedown', this.mouseDownHandler);
-      canvas.removeEventListener('mousemove', this.mouseMoveHandler);
-      canvas.removeEventListener('mouseup', this.mouseUpHandler);
-      canvas.removeEventListener('mouseleave', this.mouseLeaveHandler);
+      const handlers = this.mouseHandlers[index];
+      canvas.removeEventListener('mousedown', handlers.mousedown);
+      canvas.removeEventListener('mousemove', handlers.mousemove);
+      canvas.removeEventListener('mouseup', handlers.mouseup);
+      canvas.removeEventListener('mouseleave', handlers.mouseleave);
+      
+      delete this.mouseHandlers[index];
     },
     
-    handleMouseDown(event) {
-      if (!this.chart) return;
+    handleMouseDown(event, index) {
+      const config = this.chartConfigs[index];
+      const chart = this.charts[config.id];
+      if (!chart) return;
       
       const rect = event.target.getBoundingClientRect();
       const x = event.clientX - rect.left;
       
-      const chartArea = this.chart.chartArea;
+      const chartArea = chart.chartArea;
       if (chartArea && x >= chartArea.left && x <= chartArea.right) {
         this.isSelecting = true;
-        // 存储页面坐标而不是相对坐标
+        this.activeChartIndex = index;
         this.selectionStartX = event.clientX;
         this.selectionEndX = event.clientX;
       }
     },
     
-    handleMouseMove(event) {
-      if (!this.isSelecting || !this.chart) return;
+    handleMouseMove(event, index) {
+      if (!this.isSelecting || this.activeChartIndex !== index) return;
+      
+      const config = this.chartConfigs[index];
+      const chart = this.charts[config.id];
+      if (!chart) return;
       
       const rect = event.target.getBoundingClientRect();
       const x = event.clientX - rect.left;
       
-      const chartArea = this.chart.chartArea;
+      const chartArea = chart.chartArea;
       if (chartArea) {
-        // 限制在图表区域内，但使用页面坐标
         if (x >= chartArea.left && x <= chartArea.right) {
           this.selectionEndX = event.clientX;
         }
       }
     },
     
-    handleMouseUp(event) {
-      if (!this.isSelecting || !this.chart) return;
+    handleMouseUp(event, index) {
+      if (!this.isSelecting || this.activeChartIndex !== index) return;
+      
+      const config = this.chartConfigs[index];
+      const chart = this.charts[config.id];
+      if (!chart) return;
       
       this.isSelecting = false;
       
       const rect = event.target.getBoundingClientRect();
-      const xAxis = this.chart.scales.x;
+      const xAxis = chart.scales.x;
       if (!xAxis) return;
       
-      // 转换为相对于canvas的坐标
       const startX = this.selectionStartX - rect.left;
       const endX = this.selectionEndX - rect.left;
       
@@ -608,23 +758,58 @@ export default {
       
       this.selectionStartX = null;
       this.selectionEndX = null;
+      this.activeChartIndex = null;
     },
     
-    handleMouseLeave() {
-      this.isSelecting = false;
-      this.selectionStartX = null;
-      this.selectionEndX = null;
+    handleMouseLeave(event, index) {
+      if (this.activeChartIndex === index) {
+        this.isSelecting = false;
+        this.selectionStartX = null;
+        this.selectionEndX = null;
+        this.activeChartIndex = null;
+      }
+    },
+    
+    getSelectionStyle(index) {
+      if (!this.isSelecting || this.activeChartIndex !== index) return {};
+      
+      const config = this.chartConfigs[index];
+      const chart = this.charts[config.id];
+      if (!chart) return {};
+      
+      const chartArea = chart.chartArea;
+      if (!chartArea) return {};
+      
+      const canvas = this.$refs['chartCanvas_' + index]?.[0];
+      if (!canvas) return {};
+      
+      const canvasRect = canvas.getBoundingClientRect();
+      const left = Math.min(this.selectionStartX, this.selectionEndX) - canvasRect.left;
+      const width = Math.abs(this.selectionEndX - this.selectionStartX);
+      
+      return {
+        left: `${left}px`,
+        width: `${width}px`,
+        top: `${chartArea.top}px`,
+        height: `${chartArea.bottom - chartArea.top}px`,
+        backgroundColor: this.stages.find(s => s.value === this.selectedStage)?.color + '30',
+        position: 'absolute',
+        pointerEvents: 'none',
+        borderColor: this.stages.find(s => s.value === this.selectedStage)?.color
+      };
     },
     
     addAnnotation(start, end, stage) {
-      start = Math.max(0, Math.min(start, this.currentFeatureData.length - 1));
-      end = Math.max(0, Math.min(end, this.currentFeatureData.length - 1));
+      const dataLength = this.npzData[this.features[0]].length;
+      start = Math.max(0, Math.min(start, dataLength - 1));
+      end = Math.max(0, Math.min(end, dataLength - 1));
       
       const newAnnotation = { start, end, stage };
       const merged = this.mergeAnnotations([...this.annotations, newAnnotation]);
       this.annotations = merged;
       
-      this.updateChart();
+      // 更新所有图表
+      this.updateAllCharts();
     },
     
     mergeAnnotations(annotations) {
@@ -665,14 +850,26 @@ export default {
     
     removeAnnotation(index) {
       this.annotations.splice(index, 1);
-      this.updateChart();
+      this.updateAllCharts();
     },
     
     clearAnnotations() {
       if (confirm('确定要清除所有标注吗？')) {
         this.annotations = [];
-        this.updateChart();
+        this.updateAllCharts();
       }
+    },
+    
+    clearAllCharts() {
+      // 清理所有图表
+      Object.keys(this.charts).forEach(chartId => {
+        if (this.charts[chartId]) {
+          this.charts[chartId].destroy();
+        }
+      });
+      this.charts = {};
+      this.chartConfigs = [];
+      this.chartIdCounter = 0;
     },
     
     showComparison() {
@@ -696,7 +893,6 @@ export default {
     calculateComparisonStats() {
       const totalPoints = this.groundTruth.length;
       
-      // 创建标注数组
       const annotationArray = new Array(totalPoints).fill(-1);
       this.annotations.forEach(ann => {
         for (let i = ann.start; i <= ann.end && i < totalPoints; i++) {
@@ -704,7 +900,6 @@ export default {
         }
       });
       
-      // 初始化每个阶段的统计
       this.stageComparison = {};
       this.stages.forEach(stage => {
         this.stageComparison[stage.value] = {
@@ -715,28 +910,23 @@ export default {
         };
       });
       
-      // 计算统计数据
       for (let i = 0; i < totalPoints; i++) {
         const gtValue = this.groundTruth[i];
         const annValue = annotationArray[i];
         
-        // 统计ground truth中各阶段点数
         if (gtValue >= 0 && gtValue <= 3) {
           this.stageComparison[gtValue].gtPoints++;
         }
         
-        // 统计标注中各阶段点数
         if (annValue >= 0 && annValue <= 3) {
           this.stageComparison[annValue].annPoints++;
         }
         
-        // 统计重合点数
         if (gtValue === annValue && annValue >= 0) {
           this.stageComparison[gtValue].overlapPoints++;
         }
       }
       
-      // 计算重合率
       this.stages.forEach(stage => {
         const stats = this.stageComparison[stage.value];
         if (stats.gtPoints > 0) {
@@ -744,7 +934,6 @@ export default {
         }
       });
       
-      // 计算当前选择阶段的统计
       const currentStageStats = this.stageComparison[this.selectedStage];
       this.comparisonStats = {
         totalPoints: totalPoints,
@@ -758,13 +947,11 @@ export default {
     async createComparisonCharts() {
       await this.$nextTick();
       
-      // 创建ground truth对比图
       const gtCanvas = this.$refs.gtComparisonCanvas;
       const annCanvas = this.$refs.annComparisonCanvas;
       
       if (!gtCanvas || !annCanvas) return;
       
-      // 销毁旧图表
       if (this.gtComparisonChart) {
         this.gtComparisonChart.destroy();
       }
@@ -772,7 +959,6 @@ export default {
         this.annComparisonChart.destroy();
       }
       
-      // 创建标注数组
       const annotationArray = new Array(this.groundTruth.length).fill(-1);
       this.annotations.forEach(ann => {
         for (let i = ann.start; i <= ann.end && i < this.groundTruth.length; i++) {
@@ -780,7 +966,8 @@ export default {
         }
       });
       
-      // 创建ground truth图表
+      const timeLabels = this.generateTimeLabels(this.groundTruth.length);
+      
       const gtColors = this.groundTruth.map(val => 
         this.stages.find(s => s.value === val)?.color || '#ccc'
       );
@@ -788,7 +975,7 @@ export default {
       this.gtComparisonChart = new Chart(gtCanvas.getContext('2d'), {
         type: 'line',
         data: {
-          labels: Array.from({ length: this.groundTruth.length }, (_, i) => i),
+          labels: timeLabels,
           datasets: [{
             label: '标签',
             data: this.groundTruth,
@@ -810,8 +997,18 @@ export default {
           animation: false,
           plugins: {
             legend: { display: false },
-            tooltip: {
-              enabled: false  // 禁用提示框
+            tooltip: { 
+              enabled: true,
+              callbacks: {
+                title: (context) => {
+                  const index = context[0].dataIndex;
+                  return `时间: ${this.formatTime(index)}`;
+                },
+                label: (context) => {
+                  const stage = this.stages.find(s => s.value === context.parsed.y);
+                  return stage ? `阶段: ${stage.label}` : '';
+                }
+              }
             },
             zoom: {
               pan: { enabled: true, mode: 'x' },
@@ -822,11 +1019,7 @@ export default {
             }
           },
           scales: {
-            x: {
-              display: true,
-              title: { display: true, text: '采样点' },
-              ticks: { maxTicksLimit: 20 }
-            },
+            x: this.generateXAxisConfig(this.groundTruth.length),
             y: {
               display: true,
               title: { display: true, text: '阶段' },
@@ -844,7 +1037,6 @@ export default {
         }
       });
       
-      // 创建标注图表
       const annColors = annotationArray.map(val => {
         if (val === -1) return '#e0e0e0';
         return this.stages.find(s => s.value === val)?.color || '#ccc';
@@ -853,7 +1045,7 @@ export default {
       this.annComparisonChart = new Chart(annCanvas.getContext('2d'), {
         type: 'line',
         data: {
-          labels: Array.from({ length: annotationArray.length }, (_, i) => i),
+          labels: timeLabels,
           datasets: [{
             label: '标注',
             data: annotationArray.map(v => v === -1 ? null : v),
@@ -876,8 +1068,18 @@ export default {
           animation: false,
           plugins: {
             legend: { display: false },
-            tooltip: {
-              enabled: false  // 禁用提示框
+            tooltip: { 
+              enabled: true,
+              callbacks: {
+                title: (context) => {
+                  const index = context[0].dataIndex;
+                  return `时间: ${this.formatTime(index)}`;
+                },
+                label: (context) => {
+                  const stage = this.stages.find(s => s.value === context.parsed.y);
+                  return stage ? `阶段: ${stage.label}` : '未标注';
+                }
+              }
             },
             zoom: {
               pan: { enabled: true, mode: 'x' },
@@ -888,11 +1090,7 @@ export default {
             }
           },
           scales: {
-            x: {
-              display: true,
-              title: { display: true, text: '采样点' },
-              ticks: { maxTicksLimit: 20 }
-            },
+            x: this.generateXAxisConfig(annotationArray.length),
             y: {
               display: true,
               title: { display: true, text: '阶段' },
@@ -940,6 +1138,7 @@ export default {
         this.gtChart = null;
       }
       
+      const timeLabels = this.generateTimeLabels(this.groundTruth.length);
       const pointColors = this.groundTruth.map(val => 
         this.stages.find(s => s.value === val)?.color || '#000'
       );
@@ -947,7 +1146,7 @@ export default {
       this.gtChart = new Chart(ctx, {
         type: 'line',
         data: {
-          labels: Array.from({ length: this.groundTruth.length }, (_, i) => i),
+          labels: timeLabels,
           datasets: [{
             label: '睡眠阶段',
             data: this.groundTruth,
@@ -968,46 +1167,37 @@ export default {
           maintainAspectRatio: false,
           animation: false,
           plugins: {
-            legend: {
-              display: false
-            },
-            tooltip: {
-              enabled: false  // 禁用提示框
+            legend: { display: false },
+            tooltip: { 
+              enabled: true,
+              callbacks: {
+                title: (context) => {
+                  const index = context[0].dataIndex;
+                  return `时间: ${this.formatTime(index)}`;
+                },
+                label: (context) => {
+                  const stage = this.stages.find(s => s.value === context.parsed.y);
+                  return stage ? `阶段: ${stage.label}` : '';
+                }
+              }
             },
             zoom: {
               limits: {
                 x: {min: 0, max: this.groundTruth.length - 1},
                 y: {min: -0.5, max: 3.5}
               },
-              pan: {
-                enabled: true,
-                mode: 'x',
-              },
+              pan: { enabled: true, mode: 'x' },
               zoom: {
-                wheel: {
-                  enabled: true,
-                },
+                wheel: { enabled: true },
                 mode: 'x',
               }
             }
           },
           scales: {
-            x: {
-              display: true,
-              title: {
-                display: true,
-                text: '采样点'
-              },
-              ticks: {
-                maxTicksLimit: 20
-              }
-            },
+            x: this.generateXAxisConfig(this.groundTruth.length),
             y: {
               display: true,
-              title: {
-                display: true,
-                text: '睡眠阶段'
-              },
+              title: { display: true, text: '睡眠阶段' },
               ticks: {
                 stepSize: 1,
                 callback: (value) => {
@@ -1026,8 +1216,17 @@ export default {
     exportAnnotations() {
       const exportData = {
         fileName: this.fileName,
-        selectedFeature: this.selectedFeature,
-        annotations: this.annotations,
+        totalHours: this.totalHours,
+        samplingRate: this.samplingRate,
+        charts: this.chartConfigs.map(config => ({
+          feature: config.selectedFeature
+        })),
+        annotations: this.annotations.map(ann => ({
+          ...ann,
+          startTime: this.formatTime(ann.start),
+          endTime: this.formatTime(ann.end),
+          duration: this.formatDuration(ann.end - ann.start + 1)
+        })),
         stages: this.stages,
         timestamp: new Date().toISOString()
       };
@@ -1045,14 +1244,14 @@ export default {
   },
   
   beforeUnmount() {
-    // 清理事件监听器
-    this.removeMouseEvents();
+    // 清理所有事件监听器
+    this.chartConfigs.forEach((_, index) => {
+      this.removeMouseEvents(index);
+    });
     
-    // 销毁图表
-    if (this.chart) {
-      this.chart.destroy();
-      this.chart = null;
-    }
+    // 销毁所有图表
+    this.clearAllCharts();
+    
     if (this.gtChart) {
       this.gtChart.destroy();
       this.gtChart = null;
@@ -1068,23 +1267,21 @@ export default {
   }
 };
 </script>
-v<style scoped>
-/* 关键修改：让主容器可以滚动 */
+<style scoped>
 .sleep-stage-annotation {
-  height: 100vh; /* 将高度固定为视口高度 */
-  overflow-y: auto; /* 当内容溢出时，显示垂直滚动条 */
-  box-sizing: border-box; /* 确保 padding 不会影响总高度 */
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
   padding: 20px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  /* min-height: 100vh;  <-- 旧代码，已替换 */
 }
 
-/* 基础样式保持不变，添加新的对比分析样式 */
 .container {
-  max-width: 1400px;
+  max-width: 1600px;
   margin: 0 auto;
 }
+
 .upload-section {
   margin-bottom: 30px;
   padding: 25px;
@@ -1092,20 +1289,24 @@ v<style scoped>
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
 }
+
 .upload-section h2 {
   margin-top: 0;
   margin-bottom: 20px;
   color: #2d3748;
   font-size: 28px;
 }
+
 .file-upload {
   margin-bottom: 20px;
 }
+
 .upload-options {
   display: flex;
   gap: 15px;
   margin-bottom: 15px;
 }
+
 .upload-btn {
   padding: 12px 24px;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -1118,17 +1319,21 @@ v<style scoped>
   transition: all 0.3s;
   box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
 }
+
 .upload-btn:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
 }
+
 .demo-btn {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
   box-shadow: 0 4px 15px rgba(245, 87, 108, 0.3);
 }
+
 .demo-btn:hover {
   box-shadow: 0 6px 20px rgba(245, 87, 108, 0.4);
 }
+
 .file-name {
   color: #4a5568;
   font-size: 14px;
@@ -1137,34 +1342,7 @@ v<style scoped>
   border-radius: 6px;
   display: inline-block;
 }
-.feature-select {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.feature-select label {
-  font-weight: 600;
-  color: #2d3748;
-  font-size: 15px;
-}
-.feature-select select {
-  padding: 10px 16px;
-  border: 2px solid #e2e8f0;
-  border-radius: 8px;
-  font-size: 14px;
-  background: white;
-  cursor: pointer;
-  transition: all 0.3s;
-  min-width: 200px;
-}
-.feature-select select:hover {
-  border-color: #cbd5e0;
-}
-.feature-select select:focus {
-  outline: none;
-  border-color: #667eea;
-  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-}
+
 .stage-selection {
   margin-bottom: 30px;
   padding: 25px;
@@ -1172,17 +1350,20 @@ v<style scoped>
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
 }
+
 .stage-selection h3 {
   margin-top: 0;
   margin-bottom: 20px;
   color: #2d3748;
   font-size: 20px;
 }
+
 .radio-group {
   display: flex;
   gap: 35px;
   flex-wrap: wrap;
 }
+
 .radio-label {
   display: flex;
   align-items: center;
@@ -1193,34 +1374,155 @@ v<style scoped>
   border-radius: 8px;
   transition: all 0.3s;
 }
+
 .radio-label:hover {
   background: #f7fafc;
 }
+
 .radio-label input[type="radio"] {
   width: 20px;
   height: 20px;
   cursor: pointer;
 }
+
 .radio-label span {
   font-weight: 600;
 }
-.chart-container {
-  height: 450px;
+
+/* 新增多曲线管理样式 */
+.charts-manager {
   margin-bottom: 30px;
   padding: 25px;
   background: white;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
 }
+
+.charts-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.charts-header h3 {
+  margin: 0;
+  color: #2d3748;
+  font-size: 20px;
+}
+
+.btn-add-chart {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.3s;
+  box-shadow: 0 4px 15px rgba(168, 224, 99, 0.3);
+}
+
+.btn-add-chart:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(168, 224, 99, 0.4);
+}
+
+.btn-add-chart:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.add-icon {
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+  gap: 20px;
+}
+
+.chart-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 15px;
+  background: #fafafa;
+}
+
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.feature-selector {
+  flex: 1;
+  padding: 8px 12px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 14px;
+  background: white;
+  cursor: pointer;
+  transition: all 0.3s;
+  max-width: 200px;
+}
+
+.feature-selector:hover {
+  border-color: #cbd5e0;
+}
+
+.feature-selector:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.btn-remove-chart {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: #ef4444;
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 10px;
+}
+
+.btn-remove-chart:hover {
+  background: #dc2626;
+  transform: scale(1.1);
+}
+
+.chart-container {
+  height: 350px;
+  background: white;
+  border-radius: 8px;
+  padding: 15px;
+}
+
 .canvas-wrapper {
   position: relative;
   width: 100%;
-  height: 100%;
+  height: 300px;
 }
+
 .canvas-wrapper canvas {
   width: 100% !important;
   height: 100% !important;
 }
+
 .selection-overlay {
   position: absolute;
   pointer-events: none;
@@ -1228,12 +1530,14 @@ v<style scoped>
   border-radius: 4px;
   z-index: 10;
 }
+
 .action-buttons {
   display: flex;
   gap: 15px;
   margin-bottom: 30px;
   flex-wrap: wrap;
 }
+
 .btn {
   padding: 12px 28px;
   border: none;
@@ -1244,38 +1548,47 @@ v<style scoped>
   transition: all 0.3s;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
 }
+
 .btn-primary {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
 }
+
 .btn-primary:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(102, 126, 234, 0.3);
 }
+
 .btn-secondary {
   background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
   color: white;
 }
+
 .btn-secondary:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(168, 224, 99, 0.3);
 }
+
 .btn-danger {
   background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
   color: white;
 }
+
 .btn-danger:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(235, 51, 73, 0.3);
 }
+
 .btn-export {
   background: linear-gradient(135deg, #ffd89b 0%, #19547b 100%);
   color: white;
 }
+
 .btn-export:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 20px rgba(25, 84, 123, 0.3);
 }
+
 .btn-small {
   padding: 5px 12px;
   background: #f7fafc;
@@ -1287,27 +1600,32 @@ v<style scoped>
   margin-left: auto;
   transition: all 0.3s;
 }
+
 .btn-small:hover {
   background: #edf2f7;
   color: #2d3748;
   border-color: #cbd5e0;
 }
+
 .annotations-list {
   padding: 25px;
   background: white;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
 }
+
 .annotations-list h3 {
   margin-top: 0;
   margin-bottom: 20px;
   color: #2d3748;
   font-size: 20px;
 }
+
 .annotation-items {
   max-height: 300px;
   overflow-y: auto;
 }
+
 .annotation-item {
   padding: 12px 16px;
   margin-bottom: 10px;
@@ -1319,25 +1637,30 @@ v<style scoped>
   font-size: 14px;
   transition: all 0.3s;
 }
+
 .annotation-item:hover {
   background: white;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
 }
+
 .stage-label {
   padding: 4px 10px;
   border-radius: 6px;
   font-weight: 600;
   margin-right: 12px;
 }
+
 .range {
   color: #4a5568;
   font-family: 'SF Mono', Monaco, 'Courier New', monospace;
   margin-right: 8px;
 }
+
 .duration {
   color: #718096;
   font-size: 13px;
 }
+
 .modal {
   position: fixed;
   top: 0;
@@ -1351,6 +1674,7 @@ v<style scoped>
   align-items: center;
   z-index: 1000;
 }
+
 .modal-content {
   background: white;
   padding: 35px;
@@ -1361,16 +1685,18 @@ v<style scoped>
   overflow-y: auto;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
+
 .modal-large {
   max-width: 1200px;
 }
+
 .modal-content h3 {
   margin-top: 0;
   margin-bottom: 25px;
   color: #2d3748;
   font-size: 24px;
 }
-/* 新增对比分析样式 */
+
 .current-stage-info {
   padding: 15px;
   background: #f7fafc;
@@ -1380,41 +1706,48 @@ v<style scoped>
   align-items: center;
   gap: 15px;
 }
-/* 修改为垂直布局 */
+
 .comparison-charts-vertical {
   display: flex;
   flex-direction: column;
   gap: 20px;
   margin-bottom: 30px;
 }
+
 .chart-section {
   background: #f7fafc;
   padding: 20px;
   border-radius: 10px;
 }
+
 .chart-section h4 {
   margin-top: 0;
   margin-bottom: 15px;
   color: #2d3748;
   font-size: 16px;
 }
+
 .chart-section canvas {
   height: 200px !important;
 }
+
 .comparison-stats {
   margin-top: 30px;
 }
+
 .comparison-stats h4 {
   margin-bottom: 20px;
   color: #2d3748;
   font-size: 18px;
 }
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 15px;
   margin-bottom: 30px;
 }
+
 .stat-card {
   padding: 20px;
   background: #f7fafc;
@@ -1423,65 +1756,79 @@ v<style scoped>
   border: 2px solid #e2e8f0;
   transition: all 0.3s;
 }
+
 .stat-card.highlight {
   background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
   border-color: #667eea;
 }
+
 .stat-label {
   font-size: 14px;
   color: #718096;
   margin-bottom: 10px;
 }
+
 .stat-value {
   font-size: 28px;
   font-weight: bold;
   color: #2d3748;
   margin-bottom: 5px;
 }
+
 .stat-percent {
   font-size: 14px;
   color: #4a5568;
 }
+
 .comparison-table {
   margin-top: 30px;
   padding: 20px;
   background: #f7fafc;
   border-radius: 10px;
 }
+
 .comparison-table h4 {
   margin-top: 0;
   margin-bottom: 20px;
   color: #2d3748;
 }
+
 .comparison-table table {
   width: 100%;
   border-collapse: collapse;
 }
+
 .comparison-table th,
 .comparison-table td {
   padding: 12px;
   text-align: left;
   border-bottom: 1px solid #e2e8f0;
 }
+
 .comparison-table th {
   background: #edf2f7;
   font-weight: 600;
   color: #2d3748;
 }
+
 .comparison-table tr.current-row {
   background: linear-gradient(135deg, #667eea10 0%, #764ba210 100%);
 }
+
 .comparison-table tr:hover {
   background: #f7fafc;
 }
+
 .overlap-rate {
   font-weight: 600;
   color: #667eea;
 }
+
 .gt-chart-container {
   height: 350px;
   margin-bottom: 20px;
 }
+
 .stage-legend {
   display: flex;
   justify-content: center;
@@ -1489,6 +1836,7 @@ v<style scoped>
   margin: 20px 0;
   flex-wrap: wrap;
 }
+
 .legend-item {
   display: flex;
   align-items: center;
@@ -1496,28 +1844,45 @@ v<style scoped>
   font-size: 14px;
   color: #4a5568;
 }
+
 .legend-color {
   width: 20px;
   height: 20px;
   border-radius: 4px;
   border: 1px solid rgba(0, 0, 0, 0.1);
 }
-canvas {
-  max-width: 100%;
-}
+
 /* 滚动条样式 */
-.annotation-items::-webkit-scrollbar {
+.annotation-items::-webkit-scrollbar,
+.modal-content::-webkit-scrollbar {
   width: 8px;
 }
-.annotation-items::-webkit-scrollbar-track {
+
+.annotation-items::-webkit-scrollbar-track,
+.modal-content::-webkit-scrollbar-track {
   background: #f1f1f1;
   border-radius: 4px;
 }
-.annotation-items::-webkit-scrollbar-thumb {
+
+.annotation-items::-webkit-scrollbar-thumb,
+.modal-content::-webkit-scrollbar-thumb {
   background: #cbd5e0;
   border-radius: 4px;
 }
-.annotation-items::-webkit-scrollbar-thumb:hover {
+
+.annotation-items::-webkit-scrollbar-thumb:hover,
+.modal-content::-webkit-scrollbar-thumb:hover {
   background: #a0aec0;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
